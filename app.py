@@ -5,15 +5,24 @@ import os
 import requests
 from datetime import datetime
 import uuid
+from os.path import join, dirname
+from dotenv import load_dotenv
 
 
 app = Flask(__name__)
 
 # Backend EHR service base URL
 # For local testing
-EHR_BASE_URL = os.getenv("EHR_BASE_URL", "http://localhost:8001")
+# API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "http://localhost:8001")
 
 app.secret_key = os.getenv("FLASK_SECRET", "dev-secret")  # needed for sessions
+
+load_dotenv()
+
+API_GATEWAY = os.getenv('API_GATEWAY', 'http://localhost/')
+API_PORT = os.getenv('API_PORT', '8080')
+
+API_GATEWAY_URL = f"{API_GATEWAY}:{API_PORT}"
 
 # This login_required is a UI-level guard, not actual authorization
 
@@ -60,48 +69,6 @@ def health():
     return jsonify({"status": "ok", "service": "ehr-client"}), 200
 
 
-@app.route("/client/patient/create", methods=["POST"])
-def create_patient():
-    payload = request.get_json(silent=True) or {}
-
-    # Input validation
-    required_fields = ["patient_id", "name", "birth_date"]
-    missing = [
-        f for f in required_fields if f not in payload or payload.get(f) in (None, "")]
-    if missing:
-        return jsonify({"message": "Missing required data", "missing": missing}), 400
-
-    # Create record of the entered data
-    patient_information = {
-        "id": str(uuid.uuid4()),  # internal record id
-        # external patient id (or username)
-        "patient_id": payload.get("patient_id"),
-        "name": payload.get("name"),
-        "birth_date": payload.get("birth_date"),
-        "height": payload.get("height"),
-        "weight": payload.get("weight"),
-        "blood_type": payload.get("blood_type"),
-        "created_at": datetime.now().isoformat()
-    }
-
-    # Forward to backend
-    try:
-        backend_res = requests.post(
-            f"{EHR_BASE_URL}/patients",
-            json=patient_information,
-            headers=auth_headers(),
-            timeout=5
-        )
-    except requests.RequestException as e:
-        return jsonify({"error": "Backend not reachable", "details": str(e)}), 503
-
-    # Return backend response to client
-    try:
-        return jsonify(backend_res.json()), backend_res.status_code
-    except ValueError:
-        return backend_res.text, backend_res.status_code
-
-
 @app.route("/client/patient/<patient_id>", methods=["GET"])
 def read_patient_data(patient_id):
     if not patient_id:
@@ -109,7 +76,7 @@ def read_patient_data(patient_id):
 
     try:
         backend_res = requests.get(
-            f"{EHR_BASE_URL}/patients/{patient_id}",
+            f"{API_GATEWAY_URL}/patients/{patient_id}",
             headers=auth_headers(),
             timeout=5
         )
@@ -139,7 +106,7 @@ def update_patient():
         return jsonify({"error": "data must be a non-empty JSON object"}), 400
 
     # Build backend URL
-    backend_url = f"{EHR_BASE_URL}/patients/{patient_id}"
+    backend_url = f"{API_GATEWAY_URL}/patients/{patient_id}"
 
     # Forward request to backend (API Part)
     try:
@@ -163,7 +130,7 @@ def update_patient():
 
 @app.route("/client/patient/delete/<patient_id>", methods=["DELETE"])
 def delete_patient(patient_id):
-    backend_url = f"{EHR_BASE_URL}/patients/{patient_id}"
+    backend_url = f"{API_GATEWAY_URL}/patients/{patient_id}"
 
     try:
         backend_res = requests.delete(
@@ -178,6 +145,33 @@ def delete_patient(patient_id):
         return jsonify(backend_res.json()), backend_res.status_code
     except ValueError:
         return backend_res.text, backend_res.status_code
+
+
+@app.route("/patient/register", methods=["GET", "POST"])
+def set_password():
+    if request.method == "GET":
+        return render_template("register.html")
+    username = request.form.get("username")
+    password = request.form.get("password")
+
+    if not username or not password:
+        flash("Username and password required")
+        return redirect(url_for("login_page"))
+
+    try:
+        res = requests.post(
+            f"{API_GATEWAY_URL}/auth/login",
+            json={
+                "username": username,
+                "password": password,
+            },
+            timeout=5,
+        )
+    except requests.RequestException:
+        flash("Authentication service unavailable")
+        return redirect(url_for("login_page"))
+
+    return redirect(url_for("login_page"))
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -195,7 +189,7 @@ def login_page():
 
     try:
         res = requests.post(
-            f"{EHR_BASE_URL}/auth/login",
+            f"{API_GATEWAY_URL}/auth/login",
             json={
                 "username": username,
                 "password": password,
@@ -229,7 +223,7 @@ def doctor_page():
     if view_patient_id:
         try:
             res = requests.get(
-                f"http://127.0.0.1:5002/client/patient/{view_patient_id}",
+                f"{API_GATEWAY_URL}/patients/{view_patient_id}",
                 headers=auth_headers(),
                 timeout=5
             )
@@ -252,19 +246,31 @@ def doctor_page():
 @login_required
 def doctor_create_patient():
     # Read form data from UI
-    payload = {
-        "patient_id": request.form.get("patient_id"),
-        "name": request.form.get("name"),
-        "birth_date": request.form.get("birth_date"),
-        "height": request.form.get("height"),
-        "weight": request.form.get("weight"),
-        "blood_type": request.form.get("blood_type"),
+    payload = request.get_json(silent=True) or {}
+
+    # Input validation
+    required_fields = ["national_id", "name", "birth_date"]
+    missing = [
+        f for f in required_fields if f not in payload or payload.get(f) in (None, "")]
+    if missing:
+        return jsonify({"message": "Missing required data", "missing": missing}), 400
+
+    patient_information = {
+        "patient_id": str(uuid.uuid4()),  # randomly generated patient_id
+        # external patient id (or username)
+        "national_id": payload.get("national_id"),  # HASH THIS LATER!!
+        "name": payload.get("name"),
+        "birth_date": payload.get("birth_date"),
+        "height": payload.get("height"),
+        "weight": payload.get("weight"),
+        "blood_type": payload.get("blood_type"),
+        "created_at": datetime.now().isoformat()
     }
 
     try:
         res = requests.post(
-            "http://127.0.0.1:5002/client/patient/create",
-            json=payload,
+            f"{API_GATEWAY_URL}/client/patient/create",
+            json=patient_information,
             headers=auth_headers(),
             timeout=5
         )
@@ -301,7 +307,7 @@ def doctor_update_patient():
 
     try:
         res = requests.put(
-            "http://127.0.0.1:5002/client/patient/update",
+            f"{API_GATEWAY_URL}/client/patient/update",
             json=payload,
             headers=auth_headers,
             timeout=5
@@ -328,7 +334,7 @@ def patient_page():
     if patient_id:
         try:
             res = requests.get(
-                f"http://127.0.0.1:5002/client/patient/{patient_id}",
+                f"{API_GATEWAY_URL}/client/patient/{patient_id}",
                 headers=auth_headers(),
                 timeout=5
             )
@@ -365,7 +371,7 @@ def patient_update():
 
     try:
         res = requests.put(
-            "http://127.0.0.1:5002/client/patient/update",
+            f"{API_GATEWAY_URL}/client/patient/update",
             json=payload,
             headers=auth_headers(),
             timeout=5)
